@@ -1,0 +1,111 @@
+---
+title: "Project-Kira"
+author: "Kira Li"
+date: "02/12/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Set-up libraries:
+```{r}
+choose.dir()
+library(ggplot2)
+library(tidyverse)
+library(MLmetrics)
+library(knitr)
+library(gplots)
+library(tidyr)
+library(ggbiplot)
+library(stats)
+library(factoextra)
+library(dbscan)
+library(DESeq2)
+library("survival")
+library("survminer")
+```
+
+```{r}
+#Set up files 
+clinical <- read.delim("data_clinical_patient.txt")
+mutationsExtended <- read.delim("data_mutations_extended.txt")
+#RNAseq <- read.csv("RNAseq.csv")
+```
+
+```{r}
+# ctrl + shift + c comment out multiple lines
+
+mutationsFilteredSilent <- subset(mutationsExtended, Variant_Classification != "Silent") #Filter out silent variants
+#Can decide whether or not to include stop gained, early start, 3-UTR later since they're going to be hard to deal with
+mutationsFilteredSiftReq <- subset(mutationsFilteredSilent, parse_number(SIFT) <= 0.75) #filter out high sift scores
+mutationsFilteredImpact <- subset(mutationsFilteredSilent, IMPACT != "LOW") #filter out low impact from non-silents
+mutationsFilteredPolyphenReq <- subset(mutationsFilteredSilent, parse_number(PolyPhen) >= 0.446) #filter out low polyphen scores (benign)
+
+#Filter All 
+#FIXME: possible issue is that this also filters out entries that do not have sift/polyphen scores
+mutationsFilteredAllReq <- subset(mutationsFilteredSiftReq, (IMPACT != "LOW") && (parse_number(PolyPhen) >= 0.446))
+
+#Get all unique Genes from filterAll dataframe
+unique_Genes <- unique(mutationsFilteredAllReq$Hugo_Symbol)
+
+#Get all unique Patients from filterAll dataframe Tumor_Sample_Barcode
+unique_Patient_Reads <- unique(mutationsFilteredAllReq$Tumor_Sample_Barcode)
+```
+
+Note that after filtering all, there are 469 patients who fit filtered criteria, from an original tally of 487
+
+```{r}
+#Add unique patients as columns and unique genes as rows
+useMatrix <- data.frame(matrix(nrow = length(unique_Patient_Reads), ncol = length(unique_Genes)))
+colnames(useMatrix) <- c(unique_Genes)
+rownames(useMatrix) <- c(unique_Patient_Reads)
+
+#Fill in boolean matrix
+for (i in 1:nrow(mutationsFilteredAllReq)) {
+  #This line uses the existence of the gene name and patient "name" in the same row in the filtered mutations matrix
+  useMatrix[mutationsFilteredAllReq[i, 'Tumor_Sample_Barcode'], mutationsFilteredAllReq[i, 'Hugo_Symbol']] <- 1
+}
+```
+
+```{r}
+#Turn all nulls into zeroes
+useMatrix[is.na(useMatrix)] <- 0
+```
+
+**Need to run**
+**Filters out genes with low patient expression numbers** 
+```{r}
+useMatrixFinal <- useMatrix[,colSums(useMatrix) >=3]
+#Manually remove outliers from useMatrix and try clustering again
+toRemove <- c("TCGA-21-1079-01", "TCGA-90-A4ED-01")
+useMatrixFinal <- useMatrixFinal[!(row.names(useMatrixFinal) %in% toRemove),]
+```
+
+**Need to run**
+**Reduction on FILTERED patients and mutations (Removed <=3)**
+```{r}
+useMatrixFinal <- t(useMatrixFinal)
+useMatrixFinal.pca20 <- prcomp(useMatrixFinal, center = TRUE, scale. = FALSE, rank. = 20)
+pcReduction20.FilteredandRemoved <- data.frame(useMatrixFinal.pca20$rotation)
+```
+
+Analyzing PCA data:
+```{r}
+# variance
+pr_var = ( useMatrixFinal.pca20$sdev )^2 
+
+# % of variance
+prop_varex = pr_var / sum( pr_var )
+
+# Plot
+plot( prop_varex, xlab = "Principal Component", 
+                  ylab = "Proportion of Variance Explained", type = "b" )
+
+plot( cumsum( prop_varex ), xlab = "Principal Component", 
+                            ylab = "Cumulative Proportion of Variance Explained", type = "b" )
+```
+
+

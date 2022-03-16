@@ -1,0 +1,573 @@
+---
+title: "Project-Charlene"
+author: "Charlene Harasym"
+date: "01/12/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Set-up libraries:
+```{r}
+choose.dir()
+library(ggplot2)
+library(tidyverse)
+library(MLmetrics)
+library(knitr)
+library(gplots)
+library(tidyr)
+library(ggbiplot)
+library(stats)
+library(factoextra)
+library(dbscan)
+library(DESeq2)
+```
+
+```{r}
+#Set up files 
+clinical <- read.delim("data_clinical_patient.txt")
+mutationsExtended <- read.delim(choose.files())
+RNAseq <- read.csv("RNAseq.csv")
+```
+
+**Need to run**
+```{r}
+# ctrl + shift + c comment out multiple lines
+
+mutationsFilteredSilent <- subset(mutationsExtended, Variant_Classification != "Silent") #Filter out silent variants
+#Can decide whether or not to include stop gained, early start, 3-UTR later since they're going to be hard to deal with
+mutationsFilteredSiftReq <- subset(mutationsFilteredSilent, parse_number(SIFT) <= 0.75) #filter out high sift scores
+mutationsFilteredImpact <- subset(mutationsFilteredSilent, IMPACT != "LOW") #filter out low impact from non-silents
+mutationsFilteredPolyphenReq <- subset(mutationsFilteredSilent, parse_number(PolyPhen) >= 0.446) #filter out low polyphen scores (benign)
+
+#Filter All 
+#FIXME: possible issue is that this also filters out entries that do not have sift/polyphen scores
+mutationsFilteredAllReq <- subset(mutationsFilteredSiftReq, (IMPACT != "LOW") && (parse_number(PolyPhen) >= 0.446))
+
+#Get all unique Genes from filterAll dataframe
+unique_Genes <- unique(mutationsFilteredAllReq$Hugo_Symbol)
+
+#Get all unique Patients from filterAll dataframe Tumor_Sample_Barcode
+unique_Patient_Reads <- unique(mutationsFilteredAllReq$Tumor_Sample_Barcode)
+```
+
+Note that after filtering all, there are 469 patients who fit filtered criteria, from an original tally of 487
+
+**Need to run**
+```{r}
+#Add unique patients as rows and unique genes as rows
+useMatrix <- data.frame(matrix(nrow = length(unique_Patient_Reads), ncol = length(unique_Genes)))
+colnames(useMatrix) <- c(unique_Genes)
+rownames(useMatrix) <- c(unique_Patient_Reads)
+
+#Fill in boolean matrix
+for (i in 1:nrow(mutationsFilteredAllReq)) {
+  #This line uses the existence of the gene name and patient "name" in the same row in the filtered mutations matrix
+  useMatrix[mutationsFilteredAllReq[i, 'Tumor_Sample_Barcode'], mutationsFilteredAllReq[i, 'Hugo_Symbol']] <- 1
+}
+```
+
+**Need to run**
+```{r}
+#Turn all nulls into zeroes
+useMatrix[is.na(useMatrix)] <- 0
+#useMatrix.pca <- prcomp(useMatrix, center = TRUE, scale. = TRUE) #This is needed for ggbiplot (requires PCA object)
+
+#useMatrix.pca <- prcomp(useMatrix, center = FALSE, scale. = FALSE, rank. = 5) 
+```
+
+**Need to run**
+**Filters out genes with low patient expression numbers** 
+```{r}
+useMatrixFinal <- useMatrix[,colSums(useMatrix) >=3]
+```
+
+**Need to run**
+**Reduction on FILTERED patients and mutations (Removed <=3)**
+```{r}
+useMatrixFinal <- t(useMatrixFinal) #flip rows and columns such that patients are in columns and genes are in rows
+useMatrixFinal.pca20 <- prcomp(useMatrixFinal, center = TRUE, scale. = FALSE, rank. = 20)
+pcReduction20.FilteredandRemoved <- data.frame(useMatrixFinal.pca20$rotation)
+```
+
+**Clustering and visualization of data**
+```{r}
+#https://www.r-bloggers.com/2017/02/finding-optimal-number-of-clusters/
+#Elbow Method for finding the optimal number of clusters
+# Compute and plot wss for k1 to k2
+k2 <- 50
+data <- pcReduction20.FilteredandRemoved
+wss <- sapply(1:k2, 
+              function(k){kmeans(data, k, nstart=50,iter.max = 15 )$tot.withinss})
+wss
+plot(1:k2+1, wss,
+     type="b", pch = 19, frame = FALSE, 
+     xlab="Number of clusters K",
+     ylab="Total within-clusters sum of squares")
+```
+There is a bend at around k = 22, however, this is also a point where our clusters exceed the number of principal components we have (20). We ran the same plot generation for k = 30, k = 50, etc. and saw similar behaviour, thus, we concluded that there was no concrete bend in the graph.
+
+```{r}
+km.pcReduction20.FilteredandRemoved <- kmeans(pcReduction20.FilteredandRemoved, 10, iter.max = 25, nstart = 30)
+km.pcReduction20ResultsFilteredandRemoved <- as.matrix(km.pcReduction20.FilteredandRemoved$cluster)
+```
+
+```{r}
+fviz_cluster(km.pcReduction20.FilteredandRemoved, data = pcReduction20.FilteredandRemoved)
+```
+
+
+
+**Data Visualization and Differential Analysis**
+  Preparing the data 
+
+```{r}
+#Organize the patient data 
+clinical <- read.delim("data_clinical_patient.txt")
+colnames(clinical)<-clinical[4,] #Change the column names to the 4th row 
+clinical <- clinical[-c(1, 2, 3, 4), ] #Remove the unnecessary rows 
+row.names(clinical) <- 1:nrow(clinical) #Re-number rows so that they start at 1
+```
+
+
+**Data Visualization **
+
+This needs to be removed at the end!!!!
+```{r}
+head(useMatrixFinal)
+
+##Are the patients rownames? 
+#YES- Skip next code block
+#NO- Run next code block 
+```
+
+**ONLY RUN SOMETIMES**
+```{r}
+useMatrixFinal<-t(useMatrixFinal)
+```
+
+
+```{r}
+RNAseq <- read.csv("RNAseq.csv")
+
+#Filter RNAseq data 
+RNAseq=RNAseq[rowSums(RNAseq[,2:552])>=10,] #Filter out rows that have 0 or 1 expression across all
+
+patientsKept<-rownames(useMatrixFinal)
+patientsKept <- substr(patientsKept, 1,nchar(patientsKept)-3) #Remove "-01" at end of patient IDs"
+
+RowNames<-RNAseq$X
+ColumnNames<-colnames(RNAseq)
+ColumnNames <- substr(ColumnNames, 1,nchar(ColumnNames)-16) #Remove extra characters of patient ID
+
+
+ColumnNames<-str_replace_all((ColumnNames), "\\.", "-") #Change periods to dashes in patient ID's
+names(RNAseq)<- ColumnNames #Rename columns in RNAseq dataframe
+
+RNAseq <- RNAseq[,(colnames(RNAseq) %in% patientsKept)] #Keep the patients that are used in the mutations data
+
+row.names(RNAseq)<-c(RowNames) #Rename rows to be the genes
+RNAseqFil <- RNAseq[rowSums(RNAseq)>1,] #Filter out genes that have very low expression
+
+colNames<-colnames(RNAseqFil)
+colnames(RNAseqFil)<-colNames #Rename columns to differentiate duplicates
+ToRemove<-grep(".1", as.character(colnames(RNAseqFil)), fixed = TRUE, value=TRUE)
+
+RNAseqFil<-RNAseqFil[,!(names(RNAseqFil) %in% ToRemove)] #Remove duplicate columns 
+
+```
+
+Rename rows in pcreduction matrix 
+```{r}
+rowNames<-rownames(pcReduction20.FilteredandRemoved)
+rowNames <- substr(rowNames, 1,nchar(rowNames)-3) #Remove "-01" at end of patient IDs"
+rownames(pcReduction20.FilteredandRemoved)<-rowNames #Rename the rows
+ToRemovePatients<-setdiff(rowNames,colnames(RNAseqFil)) #Finding the patients that are not in the RNAseq data 
+
+```
+
+**Remove the 3 patients from the useMatrix and Re-run PCA**
+```{r}
+##Remove them 
+rownames(useMatrixFinal)<-patientsKept
+useMatrixFinalFil <- useMatrixFinal[!(row.names(useMatrixFinal) %in% ToRemovePatients),]
+useMatrixFinalFil <- t(useMatrixFinalFil)
+useMatrixFinalFil.pca20 <- prcomp(useMatrixFinalFil, center = TRUE, scale. = FALSE, rank. = 20)
+pcReduction20.FilteredandRemovedFil <- data.frame(useMatrixFinalFil.pca20$rotation)
+```
+```{r} 
+#Looking to find an elbow to find best number of clusters again
+
+k2 <- 30
+data <- useMatrixFinalFil
+wss <- sapply(1:k2,
+              function(k){kmeans(data, k, nstart=25,iter.max = 15 )$tot.withinss})
+wss
+plot(1:k2+1, wss,
+     type="b", pch = 19, frame = FALSE,
+     xlab="Number of Clusters K",
+     ylab="Total Within-Clusters Sum of Squares", main="Elbow Plot for Kmeans Clustering")
+
+```
+**Graphing PC's vs. clinical variables**
+```{r}
+patients <- row.names(pcReduction20.FilteredandRemovedFil)
+PC1 <- pcReduction20.FilteredandRemovedFil$PC1
+
+#connect to clinical data
+age <- vector()
+sex <- vector()
+clinical$SEX <- factor(clinical$SEX)
+
+for (i in patients){
+  patient_age <- clinical[clinical$PATIENT_ID==i, "AGE"]
+  patient_sex <- clinical[clinical$PATIENT_ID==i, "SEX"]
+   age <- cbind(age,patient_age)
+  sex <- cbind(sex,patient_sex)
+}
+plot(x=PC1, y=age)
+plot(x=PC1, y=sex)
+```
+PC1 is not correlated with age or sex which could be confounding variables, so we can use it for further analysis. 
+
+
+**PCA plot of RNAseq data to Visualize Data**
+```{r}
+pca_res<-prcomp(RNAseqFil,scale.=TRUE)
+score<-pca_res$x
+
+score=as.data.frame(score)
+
+plt<-ggplot(score, aes(x=PC1, y=PC2))+geom_point(size=4)
+plt
+```
+
+```{r}
+#Reorder RNAseqFil to have patients in the same order as the pc's so that DE works
+RNAseqFil=RNAseqFil[,order(match(colnames(RNAseqFil),rownames(pcReduction20.FilteredandRemovedFil)))]
+
+```
+
+**Differential Analysis**
+```{r}
+library(DESeq2)
+dds=DESeqDataSetFromMatrix(countData=RNAseqFil, colData=pcReduction20.FilteredandRemovedFil,design=~PC1) #Set up the DE
+
+dds=DESeq(dds) #Run the DE
+```
+
+
+
+```{r}
+dds
+res<-results(dds) #Show results
+res
+summary(res) #show summary
+
+```
+```{r}
+#Plot log2foldchange vs mean of normalized counts to visualize data
+plotMA(res,ylim=c(-20,20))
+```
+
+```{r}
+#Filter for only significant genes- adjusted p-value of less than 0.05 
+res <- subset(res, padj < 0.05)
+```
+```{r}
+#Look at strongest down regulation genes
+head(res[order(res$log2FoldChange),])
+```
+
+```{r}
+#Look at strongest upregulating genes 
+head(res[order(res$log2FoldChange, decreasing=TRUE),])
+```
+
+**Adding Gene Annotation**
+
+```{r}
+library("AnnotationDbi")
+library("org.Hs.eg.db")
+library("pathview")
+library("gage")
+library("gageData")
+```
+
+```{r}
+#Map Ensemble gene ID's to Symbols
+res$symbol=mapIds(org.Hs.eg.db,keys=row.names(res),column="SYMBOL",keytype="ENSEMBL",multiVals="first")
+```
+
+```{r}
+#Map Ensemble gene ID's to ENTREZID's
+res$entrez = mapIds(org.Hs.eg.db,keys=row.names(res),column="ENTREZID", keytype="ENSEMBL", multiVals="first")
+```
+
+```{r}
+#Map Ensemble gene ID's to Gene names
+res$name =   mapIds(org.Hs.eg.db,keys=row.names(res), column="GENENAME",keytype="ENSEMBL",multiVals="first")
+```
+
+**KEGG Pathway Analysis**
+```{r}
+#Set up Gage Pathway 
+data(kegg.sets.hs)
+data(sigmet.idx.hs)
+
+# Focus on signaling and metabolic pathways only
+kegg.sets.hs = kegg.sets.hs[sigmet.idx.hs]
+
+foldchanges = res$log2FoldChange
+
+names(foldchanges) = res$entrez
+
+head(foldchanges)
+```
+
+```{r}
+#Run Gage Pathway Analysis 
+keggres = gage(foldchanges, gsets=kegg.sets.hs)
+attributes(keggres)
+```
+
+```{r}
+#Looking at first few down pathways 
+head(keggres$less)
+```
+
+```{r}
+#Looking at first few up pathways 
+head(keggres$greater)
+```
+
+**Use Pathview to look at specific pathways**
+```{r}
+#Looking at chosen down-regulating pathway 
+pathview(gene.data=foldchanges, pathway.id="hsa04512")
+```
+
+```{r}
+#Looking at chosen up-regulating pathway 
+pathview(gene.data=foldchanges, pathway.id="hsa04975")
+```
+
+
+**Survival Analysis with pathway data**
+Survival analysis with patients who have high expression of genes in the strongest up/down-regulated gene pathways.
+
+Convert ensemble IDs to gene symbols:
+```{r}
+library("org.Hs.eg.db")
+library("survival")
+library("survminer")
+#Map Ensemble gene IDs to Gene symbols
+gene_symbols <- mapIds(org.Hs.eg.db,keys=row.names(RNAseqFil),column="SYMBOL",keytype="ENSEMBL",multiVals="first")
+RNAseqFilSurv <- RNAseqFil
+RNAseqFilSurv$symbol <- gene_symbols
+patients <- colnames(RNAseqFil) #get list of patients from the filtered RNA Seq data
+```
+
+Getting data ready:
+```{r}
+#first upregulated pathway: fat digestion and absorption
+#get list of genes that are in this pathway
+library("KEGGREST")
+#Get the list of numbers, gene symbols and gene description
+geneList<- keggGet("hsa04975")[[1]]$GENE
+#Extract only the gene symbols
+geneList <-  geneList[seq(0,length(geneList),2)]
+pathwayGenes <- gsub("\\;.*","",geneList) #list of gene symbols for genes in pathway
+pathwayGenes
+```
+
+
+```{r}
+#look at expression levels of these genes in patients (exploratory):
+#get the rows of the RNAseq data corresponding to the genes in the pathway
+geneRows <- vector()
+for (g in pathwayGenes){
+  geneRow<- which(RNAseqFilSurv$symbol==g)
+  geneRows <- c(geneRow, geneRows)
+}
+#plot the non-zero expression levels of the first few genes to see if there's a common distribution pattern
+gene1 <- RNAseqFilSurv[geneRows[1],]
+gene1
+plot(gene1[gene1>0])
+gene2 <- RNAseqFilSurv[geneRows[2],]
+plot(gene2[gene2>0])
+gene3 <- RNAseqFilSurv[geneRows[3],]
+plot(gene3[gene3>0])
+gene4 <- RNAseqFilSurv[geneRows[4],]
+plot(gene4[gene4>0])
+```
+Since there isn't a common pattern of the distribution of expression levels across the genes, define high and low expression by splitting patients into 2 even groups (above or below median expression level).
+
+```{r}
+#create dataframe with # of highly expressed genes for each patient (rows)
+numHighlyExpressed <- integer(length(patients))
+highExpression <- data.frame(numHighlyExpressed)
+row.names(highExpression) <- patients
+```
+
+```{r}
+#get # of highly expressed genes for each patient
+for (g in pathwayGenes){
+  geneIndex<- which(RNAseqFilSurv$symbol==g) #get index
+  geneRow <- RNAseqFilSurv[geneIndex,] #get row
+  geneExpressed <- geneRow[geneRow>0] # get entries where there is expression
+  medianExpression <- median(geneExpressed) 
+  high_expressed <- patients[which(geneExpressed>=medianExpression)]  #create list of patients where expression of the gene is greater than the median expression level
+  high_expressed<-high_expressed[!is.na(high_expressed)]
+  for (p in high_expressed){
+    highExpression[p,"numHighlyExpressed"] <- highExpression[p,"numHighlyExpressed"]  + 1  #add 1 to the total count of highly expressed genes for the patients who had high expression of the gene g
+  }
+}
+```
+
+```{r}
+plot(highExpression$numHighlyExpressed)
+#The plot does not show distinct groups 
+#split into 2 even groups again: high number of highly expressed genes and low number of highly expressed genes
+highPath <- patients[which(highExpression$numHighlyExpressed>=median(highExpression$numHighlyExpressed))]
+lowPath <- patients[which(highExpression$numHighlyExpressed<median(highExpression$numHighlyExpressed))]
+```
+```{r}
+#Connect to clinical data
+clinical$group <- "low" #create a new column for the group with default value of "low"
+for (i in patients){
+  if(i %in% highPath){
+    clinical[clinical$PATIENT_ID==i,"group"]="high" #reassign group to "high" if patient is in the highPath group
+  }
+}
+```
+
+Creating KM plot:
+```{r}
+#create new dataframe, change OS_STATUS to boolean, type cast OS_MONTHS
+survival.df <- clinical
+survival.df$deceased = clinical$OS_STATUS == "1:DECEASED"
+survival.df$overall_survival = as.double(clinical$OS_MONTHS)
+#survival analysis based on pathway groups
+fit = survfit(Surv(survival.df$overall_survival, survival.df$deceased) ~ survival.df$group)
+ggsurvplot(fit, data=survival.df, pval=T)+ggtitle("Kaplan Meier Plot for hsa04975 Pathway")+xlab("Time since Diagnosis (Months)")+ylab("Survival Probability")
+ggsurvplot(fit, data=survival.df, pval=T, risk.table=T, risk.table.col="strata", risk.table.height=0.35)+ggtitle("Kaplan Meier Plot for hsa04975 Pathway")+xlab("Time since Diagnosis (Months)")+ylab("Survival Probability")
+png("Upregulated.png")
+Upregulated<- ggsurvplot(fit, data=survival.df, pval=T)+ggtitle("Kaplan Meier Plot for hsa04975 Pathway")+xlab("Time since Diagnosis (Months)")+ylab("Survival Probability")
+print(Upregulated)
+dev.off()
+```
+Observations:
+- p-value slightly high
+- group with low number of highly expressed genes in the pathway have slightly better survival probability
+
+Try again with 2nd downregulated pathway:
+```{r}
+#Get the list of numbers, gene symbols and gene description
+geneList<- keggGet("hsa04512")[[1]]$GENE
+#Extract only the gene symbols
+geneList <-  geneList[seq(0,length(geneList),2)]
+pathwayGenes <- gsub("\\;.*","",geneList) #list of gene symbols for genes in pathway
+```
+
+```{r}
+#create dataframe with # of highly expressed genes for each patient(row)
+numHighlyExpressed <- integer(length(patients))
+highExpression <- data.frame(numHighlyExpressed)
+row.names(highExpression) <- patients
+```
+
+```{r}
+#get # of highly expressed genes for each patient
+for (g in pathwayGenes){
+  geneIndex<- which(RNAseqFilSurv$symbol==g) #get index
+  geneRow <- RNAseqFilSurv[geneIndex,] #get row
+  geneExpressed <- geneRow[geneRow>0] # get entries where there is expression
+  medianExpression <- median(geneExpressed) 
+  high_expressed <- patients[which(geneExpressed>=medianExpression)]  #create list of patients where expression of the gene is greater than the median expression level
+  high_expressed<-high_expressed[!is.na(high_expressed)]
+  for (p in high_expressed){
+    highExpression[p,"numHighlyExpressed"] <- highExpression[p,"numHighlyExpressed"]  + 1  #add 1 to the total count of highly expressed genes for the patients who had high expression of the gene g
+  }
+}
+```
+
+```{r}
+highPath <- patients[which(highExpression$numHighlyExpressed>=median(highExpression$numHighlyExpressed))]
+lowPath <- patients[which(highExpression$numHighlyExpressed<median(highExpression$numHighlyExpressed))]
+```
+
+```{r}
+#Connect to clinical data
+survival.df$group <- "low"
+for (i in patients){
+  if(i %in% highPath){
+    survival.df[survival.df$PATIENT_ID==i,"group"]="high"
+  }
+}
+```
+
+Creating KM plot:
+```{r}
+#survival analysis based on pathway groups
+fit = survfit(Surv(survival.df$overall_survival, survival.df$deceased) ~ survival.df$group)
+ggsurvplot(fit, data=survival.df, pval=T)+ggtitle("Kaplan Meier Plot for hsa04512 Pathway")+xlab("Time since Diagnosis (Months)")+ylab("Survival Probability")
+ggsurvplot(fit, data=survival.df, pval=T, risk.table=T, risk.table.col="strata", risk.table.height=0.35)+ggtitle("Kaplan Meier Plot for hsa04512 Pathway")+xlab("Time since Diagnosis (Months)")+ylab("Survival Probability")
+png("Downregulated.png")
+Downregulated<- ggsurvplot(fit, data=survival.df, pval=T)+ggtitle("Kaplan Meier Plot for hsa04512 Pathway")+xlab("Time since Diagnosis (Months)")+ylab("Survival Probability")
+print(Downregulated)
+dev.off()
+```
+
+
+Observations:
+- p-value very high
+- not much difference between groups, overlapping lines
+
+**Survival Analysis with clinical data/clinical data analysis**
+
+```{r}
+#Replace blank values in data frame with "Unknown":
+survival.df$SEX[survival.df$SEX== ""] <- "Unknown"
+survival.df$RADIATION_THERAPY[survival.df$RADIATION_THERAPY== ""] <- "Unknown"
+survival.df$RACE[survival.df$RACE== ""] <- "Unknown"
+survival.df$AJCC_PATHOLOGIC_TUMOR_STAGE[survival.df$AJCC_PATHOLOGIC_TUMOR_STAGE== ""] <- "Unknown"
+TUMOR_STAGE<-survival.df$AJCC_PATHOLOGIC_TUMOR_STAGE
+#survival vs. age
+plot(x=survival.df$AGE, y=survival.df$overall_survival)
+#survival analysis based on sex
+fit = survfit(Surv(survival.df$overall_survival, survival.df$deceased) ~ survival.df$SEX)
+ggsurvplot(fit, data=survival.df, pval=T)+ggtitle("Kaplan Meier Plot for Sex")+xlab("Time since Diagnosis (Months)")+ylab("Survival Probability")
+ggsurvplot(fit, data=survival.df, pval=T, risk.table=T, risk.table.col="strata", risk.table.height=0.35)+ggtitle("Kaplan Meier Plot for Sex")+xlab("Time since Diagnosis (Months)")+ylab("Survival Probability")
+
+#survival analysis based on radiation therapy
+fit = survfit(Surv(survival.df$overall_survival, survival.df$deceased) ~ survival.df$RADIATION_THERAPY)
+survplot<-ggsurvplot(fit, data=survival.df, pval=T,)+ggtitle("Kaplan Meier Plot for Radiation Therapy")+xlab("Time since Diagnosis (Months)")+ylab("Survival Probability")
+ggpubr::ggpar(survplot,
+              font.legend = list(size = 9, color = "black"))
+ggsurvplot(fit, data=survival.df, pval=T, risk.table=T, risk.table.col="strata", risk.table.height=0.35)+ggtitle("Kaplan Meier Plot for Radiation Therapy")+xlab("Time since Diagnosis (Months)")+ylab("Survival Probability")
+#survival analysis based on race
+fit = survfit(Surv(survival.df$overall_survival, survival.df$deceased) ~ survival.df$RACE)
+ggsurvplot(fit, data=survival.df, pval=T)+ggtitle("Kaplan Meier Plot for Race")+xlab("Time since Diagnosis (Months)")+ylab("Survival Probability")
+ggsurvplot(fit, data=survival.df, pval=T, risk.table=T, risk.table.col="strata", risk.table.height=0.35)+ggtitle("Kaplan Meier Plot for Race")+xlab("Time since Diagnosis (Months)")+ylab("Survival Probability")
+#survival analysis based on tumor stage
+fit = survfit(Surv(survival.df$overall_survival, survival.df$deceased) ~ TUMOR_STAGE)
+survplot<-ggsurvplot(fit, data=survival.df, pval=T)+ggtitle("Kaplan Meier Plot for Tumor Stage")+xlab("Time since Diagnosis (Months)")+ylab("Survival Probability")
+ggpubr::ggpar(survplot,
+              font.legend = list(size = , color = "black"))
+ggsurvplot(fit, data=survival.df, pval=T, risk.table=T, risk.table.col="strata", risk.table.height=0.5)+ggtitle("Kaplan Meier Plot for Tumor Stage")+xlab("Time since Diagnosis (Months)")+ylab("Survival Probability")
+```
+Observations:
+- no correlation between age of diagnosis and survival
+- no big difference in survival between sexes, patients with/without radiation therapy
+- Some differences in survival between races, but p value is relatively high and the sample sizes are very uneven
+- as expected, clear differences between different tumor stages with very significant p value.
+
+
+
+Resources 
+http://bioconductor.org/packages/release/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#pre-filtering
+https://www.biostars.org/p/366067/

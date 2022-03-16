@@ -1,0 +1,619 @@
+---
+title: "BMEG 310 Project"
+author: "Jackson Chen, Charlene Harasym, Kira Li"
+date: "21/11/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Set-up libraries:
+```{r}
+choose.dir()
+library(ggplot2)
+library(tidyverse)
+library(MLmetrics)
+library(knitr)
+library(gplots)
+library(tidyr)
+library(ggbiplot)
+library(stats)
+library(factoextra)
+library(dbscan)
+#library(DESeq2)
+```
+```{r}
+#Set up files 
+clinical <- read.delim("data_clinical_patient.txt")
+mutationsExtended <- read.delim(choose.files())
+RNAseq <- read.csv("RNAseq.csv")
+```
+
+**Need to run**
+```{r}
+# ctrl + shift + c comment out multiple lines
+
+mutationsFilteredSilent <- subset(mutationsExtended, Variant_Classification != "Silent") #Filter out silent variants
+#Can decide whether or not to include stop gained, early start, 3-UTR later since they're going to be hard to deal with
+mutationsFilteredSiftReq <- subset(mutationsFilteredSilent, parse_number(SIFT) <= 0.75) #filter out high sift scores
+mutationsFilteredImpact <- subset(mutationsFilteredSilent, IMPACT != "LOW") #filter out low impact from non-silents
+mutationsFilteredPolyphenReq <- subset(mutationsFilteredSilent, parse_number(PolyPhen) >= 0.446) #filter out low polyphen scores (benign)
+
+#Filter All 
+#FIXME: possible issue is that this also filters out entries that do not have sift/polyphen scores
+mutationsFilteredAllReq <- subset(mutationsFilteredSiftReq, (IMPACT != "LOW") && (parse_number(PolyPhen) >= 0.446))
+
+#Get all unique Genes from filterAll dataframe
+unique_Genes <- unique(mutationsFilteredAllReq$Hugo_Symbol)
+
+#Get all unique Patients from filterAll dataframe Tumor_Sample_Barcode
+unique_Patient_Reads <- unique(mutationsFilteredAllReq$Tumor_Sample_Barcode)
+```
+Note that after filtering all, there are 469 patients who fit filtered criteria, from an original tally of 487
+
+**Need to run**
+```{r}
+#Add unique patients as columns and unique genes as rows
+useMatrix <- data.frame(matrix(nrow = length(unique_Patient_Reads), ncol = length(unique_Genes)))
+colnames(useMatrix) <- c(unique_Genes)
+rownames(useMatrix) <- c(unique_Patient_Reads)
+
+#Fill in boolean matrix
+for (i in 1:nrow(mutationsFilteredAllReq)) {
+  #This line uses the existence of the gene name and patient "name" in the same row in the filtered mutations matrix
+  useMatrix[mutationsFilteredAllReq[i, 'Tumor_Sample_Barcode'], mutationsFilteredAllReq[i, 'Hugo_Symbol']] <- 1
+}
+```
+
+**Need to run**
+```{r}
+#Turn all nulls into zeroes
+useMatrix[is.na(useMatrix)] <- 0
+useMatrix.pca <- prcomp(useMatrix, center = TRUE, scale. = TRUE) #This is needed for ggbiplot (requires PCA object)
+
+#useMatrix.pca <- prcomp(useMatrix, center = FALSE, scale. = FALSE, rank. = 5) 
+```
+
+**Need to run**
+**Filters out genes with low patient expression numbers** 
+```{r}
+useMatrixFinal <- useMatrix[,colSums(useMatrix) >=3]
+```
+
+```{r}
+useMatrix.scaled <- data.frame(scale(useMatrix))
+#FIXME: 
+#useMatrix.prinComp <- princomp(useMatrix.scaled)
+```
+
+
+```{r}
+ggbiplot(useMatrix.pca)
+```
+
+
+```{r}
+km.results <- kmeans(useMatrix, 10, nstart = 25)
+```
+
+
+```{r}
+fviz_cluster(km.results, data = useMatrix)
+
+```
+```{r}
+#Attempt clustering with HDBSCAN Algorithm from dbscan package
+hdb.results <- hdbscan(useMatrix, minPts = 2)
+```
+
+```{r}
+#Display cluster assignments:
+km.results$cluster
+```
+
+```{r}
+#UseMatrix clustering, hierarchical clustering possibility:
+library(cluster)
+#Check gower dissimiliarity
+dissimilarity <- daisy(useMatrix, metric = 'gower')
+
+```
+
+
+```{r}
+#Implement hierarchical clustering:
+hierarchicalCluster <- hclust(dissimilarity, method="ward")
+```
+```{r}
+#Plot hierarchical clustering results:
+plot(hierarchicalCluster)
+
+groups <- cutree(hierarchicalCluster, k=20) # cut tree into 3 clusters
+
+# draw dendogram with red borders around the 3 clusters
+rect.hclust(hierarchicalCluster, k=20, border="red") 
+```
+
+```{r}
+#Plot on 2D graph
+#FIXME: Another instance of being unable to use princomp
+#clusplot(useMatrix, groups, color=TRUE, shade=TRUE, labels=2, lines=0, main= 'Patient Groups')
+```
+
+```{r}
+#Filtered, clustered patient results (more columns than rows)
+hierarchicalResults <- as.matrix(groups)
+```
+
+
+```{r}
+
+#Manually remove outliers from useMatrix and try clustering again
+toRemove <- c("TCGA-21-1079-01", "TCGA-90-A4ED-01")
+useMatrixRemovedOutliers <- useMatrix[!(row.names(useMatrix) %in% toRemove),]
+
+#Need to remove columns with only zeroes (for clustering)
+useMatrixRemovedOutliers <- useMatrixRemovedOutliers[,colSums(useMatrixRemovedOutliers^2) !=0]
+```
+```{r}
+km.outliersRemoved <- kmeans(useMatrixRemovedOutliers, 3, nstart = 25)
+```
+
+
+```{r}
+fviz_cluster(km.outliersRemoved, data = useMatrixRemovedOutliers)
+
+```
+
+```{r}
+#README: Attempt clustering (THIS IS PATIENT CLUSTERING BASED ON GENE EXPRESSION) again but without filtering
+
+#Get all unique genes and patients from mutationsExtended
+unique_Genes_Nonfiltered <- unique(mutationsExtended$Hugo_Symbol)
+unique_Patients_Nonfiltered <- unique(mutationsExtended$Tumor_Sample_Barcode)
+
+#Add unique patients as columns and unique genes as rows
+useMatrixNonfiltered <- data.frame(matrix(nrow = length(unique_Genes_Nonfiltered), ncol = length(unique_Patients_Nonfiltered)))
+colnames(useMatrixNonfiltered) <- c(unique_Patients_Nonfiltered)
+rownames(useMatrixNonfiltered) <- c(unique_Genes_Nonfiltered)
+
+#Fill in boolean matrix
+for (i in 1:nrow(mutationsExtended)) {
+  #This line uses the existence of the gene name and patient "name" in the same row in the filtered mutations matrix
+  useMatrixNonfiltered[mutationsExtended[i, 'Hugo_Symbol'], mutationsExtended[i, 'Tumor_Sample_Barcode']] <- 1
+}
+
+```
+
+```{r}
+#Turn all nulls into zeroes
+useMatrixNonfiltered[is.na(useMatrixNonfiltered)] <- 0
+#useMatrixNonfiltered.pca <- prcomp(useMatrixNonfiltered, center = TRUE, scale. = FALSE, rank. = 20) #This is needed for ggbiplot (requires PCA object)
+
+useMatrixNonfiltered.pca20 <- prcomp(useMatrixNonfiltered, center = FALSE, scale. = FALSE, rank. = 20)
+```
+
+
+```{r}
+pcReduction20.Nonfiltered <- data.frame(useMatrixNonfiltered.pca20$rotation)
+```
+```{r}
+#https://www.r-bloggers.com/2017/02/finding-optimal-number-of-clusters/
+#Elbow Method for finding the optimal number of clusters
+# Compute and plot wss for k1 to k2
+k2 <- 50
+data <- pcReduction20.Nonfiltered
+wss <- sapply(1:k2, 
+              function(k){kmeans(data, k, nstart=50,iter.max = 15 )$tot.withinss})
+wss
+plot(1:k2+1, wss,
+     type="b", pch = 19, frame = FALSE, 
+     xlab="Number of clusters K",
+     ylab="Total within-clusters sum of squares")
+```
+```{r}
+km.pcReduction20.Nonfiltered <- kmeans(pcReduction20.Nonfiltered, 21, iter.max = 25, nstart = 30)
+km.pcReduction20ResultsNonfiltered <- km.pcReduction20.Nonfiltered
+```
+
+```{r}
+fviz_cluster(km.pcReduction20.Nonfiltered, data = pcReduction20.Nonfiltered)
+```
+```{r}
+ggbiplot(useMatrixNonfiltered.pca20)
+```
+
+```{r}
+#https://www.r-bloggers.com/2017/02/finding-optimal-number-of-clusters/
+#Elbow Method for finding the optimal number of clusters
+# Compute and plot wss for k1 to k2
+k2 <- 10
+data <- useMatrixNonfiltered
+wss <- sapply(1:k2, 
+              function(k){kmeans(data, k, nstart=25,iter.max = 10 )$tot.withinss})
+wss
+plot(1:k2+1, wss,
+     type="b", pch = 19, frame = FALSE, 
+     xlab="Number of clusters K",
+     ylab="Total within-clusters sum of squares")
+```
+
+```{r}
+km.nonFiltered <- kmeans(useMatrixNonfiltered, 7, iter.max = 15, nstart = 30)
+```
+
+
+```{r}
+fviz_cluster(km.nonFiltered, data = useMatrixNonfiltered)
+```
+
+**Reduction on non filtered patients and genes, then kmeans**
+```{r}
+
+#Add unique patients as columns and unique genes as rows
+useMatrixFiltered <- data.frame(matrix(nrow = length(unique_Genes), ncol = length(unique_Patient_Reads)))
+colnames(useMatrixFiltered) <- c(unique_Patient_Reads)
+rownames(useMatrixFiltered) <- c(unique_Genes)
+
+#Fill in boolean matrix
+for (i in 1:nrow(mutationsFilteredAllReq)) {
+  #This line uses the existence of the gene name and patient "name" in the same row in the filtered mutations matrix
+  useMatrixFiltered[mutationsFilteredAllReq[i, 'Hugo_Symbol'], mutationsFilteredAllReq[i, 'Tumor_Sample_Barcode']] <- 1
+}
+```
+```{r}
+#Turn all nulls into zeroes
+useMatrixFiltered[is.na(useMatrixFiltered)] <- 0
+```
+```{r}
+#Store PC reduction
+useMatrixFiltered.pca20 <- prcomp(useMatrixFiltered, center = TRUE, scale. = FALSE, rank. = 20)
+```
+```{r}
+pcReduction20.Filtered <- data.frame(useMatrixFiltered.pca20$rotation)
+```
+```{r}
+#https://www.r-bloggers.com/2017/02/finding-optimal-number-of-clusters/
+#Elbow Method for finding the optimal number of clusters
+# Compute and plot wss for k1 to k2
+k2 <- 50
+data <- pcReduction20.Filtered
+wss <- sapply(1:k2, 
+              function(k){kmeans(data, k, nstart=50,iter.max = 15 )$tot.withinss})
+wss
+plot(1:k2+1, wss,
+     type="b", pch = 19, frame = FALSE, 
+     xlab="Number of clusters K",
+     ylab="Total within-clusters sum of squares")
+```
+
+```{r}
+km.pcReduction20.Filtered <- kmeans(pcReduction20.Filtered, 22, iter.max = 25, nstart = 30)
+km.pcReduction20ResultsFiltered <- as.matrix(km.pcReduction20.Filtered$cluster)
+```
+
+```{r}
+fviz_cluster(km.pcReduction20.Filtered, data = pcReduction20.Filtered)
+```
+
+
+
+```{r}
+#README: Attempt clustering (THIS IS GENE CLUSTERING BASED ON PATIENTS) again but without filtering
+
+#Get all unique genes and patients from mutationsExtended
+unique_Genes_Nonfiltered <- unique(mutationsExtended$Hugo_Symbol)
+unique_Patients_Nonfiltered <- unique(mutationsExtended$Tumor_Sample_Barcode)
+
+#Add unique patients as columns and unique genes as rows
+useMatrixNonfilteredPatients <- data.frame(matrix(nrow = length(unique_Patients_Nonfiltered), ncol = length(unique_Genes_Nonfiltered)))
+colnames(useMatrixNonfilteredPatients) <- c(unique_Genes_Nonfiltered)
+rownames(useMatrixNonfilteredPatients) <- c(unique_Patients_Nonfiltered)
+
+#Fill in boolean matrix
+for (i in 1:nrow(mutationsExtended)) {
+  #This line uses the existence of the gene name and patient "name" in the same row in the filtered mutations matrix
+  useMatrixNonfilteredPatients[mutationsExtended[i, 'Tumor_Sample_Barcode'], mutationsExtended[i, 'Hugo_Symbol']] <- 1
+}
+
+```
+
+
+```{r}
+#Turn all nulls into zeroes
+useMatrixNonfilteredPatients[is.na(useMatrixNonfilteredPatients)] <- 0
+useMatrixNonfilteredPatients.pca <- prcomp(useMatrixNonfiltered, center = TRUE, scale. = FALSE, rank. = 4) #This is needed for ggbiplot (requires PCA object)
+#FIXME: 
+```
+
+```{r}
+ggbiplot(useMatrixNonfilteredPatients.pca)
+```
+```{r}
+ggbiplot(useMatrixNonfilteredPatients.pca, choices = c(3,4))
+```
+
+```{r}
+km.nonFilteredPatients <- kmeans(useMatrixNonfilteredPatients, 8, iter.max = 15, nstart = 30)
+```
+
+
+```{r}
+fviz_cluster(km.nonFilteredPatients, data = useMatrixNonfilteredPatients)
+```
+
+
+
+
+```{r}
+km.results <- kmeans(useMatrixFinal, 3, nstart = 25)
+```
+
+
+```{r}
+fviz_cluster(km.results, data = useMatrixFinal)
+length(which(km.results$cluster==1))
+length(which(km.results$cluster==2) )
+length(which(km.results$cluster==3))
+```
+**Reduction on FILTERED patients and mutations (Removed <=3)**
+```{r}
+
+#Add unique patients as columns and unique genes as rows
+useMatrixFinal <- t(useMatrixFinal)
+# useMatrixFinal <- data.frame(matrix(nrow = nrow(useMatrixFinal), ncol = ncol(useMatrixFinal))
+# colnames(useMatrixFiltered) <- c(unique_Patient_Reads)
+# rownames(useMatrixFiltered) <- c(unique_Genes)
+
+#Fill in boolean matrix
+# for (i in 1:nrow(useMatrixFinal)) {
+#   #This line uses the existence of the gene name and patient "name" in the same row in the filtered mutations matrix
+#   useMatrix[mutationsFilteredAllReq[i, 'Hugo_Symbol'], mutationsFilteredAllReq[i, 'Tumor_Sample_Barcode']] <- 1
+# }
+```
+```{r}
+#Turn all nulls into zeroes
+#useMatrixFiltered[is.na(useMatrixFiltered)] <- 0
+#Store PC reduction
+useMatrixFinal.pca20 <- prcomp(useMatrixFinal, center = TRUE, scale. = FALSE, rank. = 20)
+```
+```{r}
+pcReduction20.FilteredandRemoved <- data.frame(useMatrixFinal.pca20$rotation)
+```
+```{r}
+#https://www.r-bloggers.com/2017/02/finding-optimal-number-of-clusters/
+#Elbow Method for finding the optimal number of clusters
+# Compute and plot wss for k1 to k2
+k2 <- 50
+data <- pcReduction20.FilteredandRemoved
+wss <- sapply(1:k2, 
+              function(k){kmeans(data, k, nstart=50,iter.max = 15 )$tot.withinss})
+wss
+plot(1:k2+1, wss,
+     type="b", pch = 19, frame = FALSE, 
+     xlab="Number of clusters K",
+     ylab="Total within-clusters sum of squares")
+```
+
+```{r}
+km.pcReduction20.FilteredandRemoved <- kmeans(pcReduction20.FilteredandRemoved, 10, iter.max = 25, nstart = 30)
+km.pcReduction20ResultsFilteredandRemoved <- as.matrix(km.pcReduction20.FilteredandRemoved$cluster)
+```
+
+```{r}
+fviz_cluster(km.pcReduction20.FilteredandRemoved, data = pcReduction20.FilteredandRemoved)
+```
+
+#Charlene trying things 
+```{r}
+km.results <- kmeans(useMatrix, 3, nstart = 25)
+fviz_cluster(km.results, data = useMatrix)
+km.results$cluster
+```
+
+```{r}
+length(which(km.results$cluster==3))
+length(which(km.results$cluster==2))
+length(which(km.results$cluster==1))
+```
+```{r}
+#Charlene trying things 
+km.results <- kmeans(useMatrix, 4, nstart = 25)
+fviz_cluster(km.results, data = useMatrix)
+km.results$cluster
+```
+
+```{r}
+length(which(km.results$cluster==3))
+length(which(km.results$cluster==2))
+length(which(km.results$cluster==4))
+```
+
+
+```{r} 
+#This needs to go in the final code 
+
+#Looking to find an elbow to find best number of clusters
+
+k2 <- 30
+data <- useMatrixFinalFil
+wss <- sapply(1:k2,
+              function(k){kmeans(data, k, nstart=25,iter.max = 15 )$tot.withinss})
+wss
+plot(1:k2+1, wss,
+     type="b", pch = 19, frame = FALSE,
+     xlab="Number of Clusters K",
+     ylab="Total Within-Clusters Sum of Squares", main="Elbow Plot for Kmeans Clustering")
+
+```
+
+
+**Attempt to increase PCs from 20 to 50 before clustering**
+```{r}
+#Store PC reduction
+useMatrixFiltered.pca50 <- prcomp(useMatrixFiltered, center = TRUE, scale. = FALSE, rank. = 50)
+```
+```{r}
+pcReduction50.Filtered <- data.frame(useMatrixFiltered.pca50$rotation)
+```
+```{r}
+#https://www.r-bloggers.com/2017/02/finding-optimal-number-of-clusters/
+#Elbow Method for finding the optimal number of clusters
+# Compute and plot wss for k1 to k2
+k2 <- 80
+data <- pcReduction50.Filtered
+wss <- sapply(1:k2, 
+              function(k){kmeans(data, k, nstart=50,iter.max = 15 )$tot.withinss})
+wss
+plot(1:k2+1, wss,
+     type="b", pch = 19, frame = FALSE, 
+     xlab="Number of clusters K",
+     ylab="Total within-clusters sum of squares")
+```
+
+```{r}
+km.pcReduction50.Filtered <- kmeans(pcReduction50.Filtered, 45, iter.max = 25, nstart = 30)
+km.pcReduction50ResultsFiltered <- as.matrix(km.pcReduction50.Filtered$cluster)
+```
+
+```{r}
+fviz_cluster(km.pcReduction50.Filtered, data = pcReduction50.Filtered)
+```
+
+
+
+
+Reference List:
+https://www.rdocumentation.org/packages/base/versions/3.6.2/topics/subset (subset function)
+https://stackoverflow.com/questions/14543627/extracting-numbers-from-vectors-of-strings (extracting numbers from vectors)
+https://stackoverflow.com/questions/1169248/test-if-a-vector-contains-a-given-element
+https://stackoverflow.com/questions/23299684/r-error-in-xed-operator-is-invalid-for-atomic-vectors
+https://stackoverflow.com/questions/8161836/how-do-i-replace-na-values-with-zeros-in-an-r-dataframe
+https://www.datanovia.com/en/lessons/k-means-clustering-in-r-algorith-and-practical-examples/
+https://uc-r.github.io/kmeans_clustering
+https://rstudio-pubs-static.s3.amazonaws.com/33876_1d7794d9a86647ca90c4f182df93f0e8.html
+
+
+
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4850126/    (Current Practices)
+https://m.ensembl.org/info/genome/variation/prediction/protein_function.html
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC168916/
+
+**Survival Analysis**
+Getting data ready:
+```{r}
+#pcReduction20.FilteredandRemoved
+#make groups from PC data- low, medium, high expression levels?
+hierarchical.df <- data.frame(hierarchicalResults) 
+hierarchical_patients <- row.names(hierarchical.df)
+#remove "-01" from end patient IDs to match clinical IDs
+hierarchical_patients <- substr(hierarchical_patients, 1,nchar(hierarchical_patients)-3)
+
+cluster1_rows <- which(hierarchical.df$hierarchicalResults==1)
+cluster1ID <- hierarchical_patients[cluster1_rows] #list of IDs of cluster 1 patients
+cluster2_rows <- which(hierarchical.df$hierarchicalResults==2)
+cluster2ID <- hierarchical_patients[cluster2_rows] #list of IDs of cluster 1 patients
+
+#connect to clinical data
+cluster1_patients <- data.frame()
+for (i in cluster1ID){
+  patient <- clinical[clinical$X.Patient.Identifier==i,c("Overall.Survival.Status","Overall.Survival..Months." )]
+  cluster1_patients <- rbind(cluster1_patients,patient)
+}
+
+cluster2_patients <- data.frame()
+for (i in cluster2ID){
+  patient <- clinical[clinical$X.Patient.Identifier==i,c("Overall.Survival.Status","Overall.Survival..Months." )]
+  cluster2_patients <- rbind(cluster2_patients,patient)
+}
+```
+
+
+**Data Visualization and Differential Analysis**
+  Preparing the data 
+
+
+```{r}
+#Organize the patient data 
+clinical <- read.delim("data_clinical_patient.txt")
+colnames(clinical)<-clinical[4,] #Change the column names to the 4th row 
+clinical <- clinical[-c(1, 2, 3, 4), ] #Remove the unnecessary rows 
+row.names(clinical) <- 1:nrow(clinical) #Re-number rows so that they start at 1
+
+
+```
+
+
+**Data Visualization **
+  Preparing the data 
+
+```{r}
+RNAseq <- read.csv("RNAseq.csv")
+#Filter RNAseq data 
+RNAseq=RNAseq[rowSums(RNAseq[,2:552])>1,] #Filter out rows that have 0 or 1 expression across all
+useMatrixFinal<-t(useMatrixFinal)
+patientsKept<-rownames(useMatrixFinal)
+patientsKept <- substr(patientsKept, 1,nchar(patientsKept)-3) #Remove "-01" at end of patient IDs"
+
+RowNames<-RNAseq$X
+ColumnNames<-colnames(RNAseq)
+ColumnNames <- substr(ColumnNames, 1,nchar(ColumnNames)-16) #Remove extra characters of patient ID
+
+
+ColumnNames<-str_replace_all((ColumnNames), "\\.", "-") #Change periods to dashes in patient ID's
+names(RNAseq)<- ColumnNames #Rename columns in RNAseq dataframe
+
+RNAseq <- RNAseq[,(colnames(RNAseq) %in% patientsKept)] ##There are some duplicates 
+row.names(RNAseq)<-c(RowNames) #Rename rows to be the genes
+RNAseqFil <- RNAseq[rowSums(RNAseq)>1,] #Filter out genes that have very low expression
+colNames<-colnames(RNAseqFil)
+colnames(RNAseqFil)<-colNames #Rename columns to differentiate duplicates
+ToRemove<-grep(".1", as.character(colnames(RNAseqFil)), fixed = TRUE, value=TRUE)
+
+RNAseqFil<-RNAseqFil[,!(names(RNAseqFil) %in% ToRemove)] #Remove duplicatecolumns 
+
+
+
+```
+
+Rename rows in pcreduction matrix 
+```{r}
+rowNames<-rownames(pcReduction20.FilteredandRemoved)
+rowNames <- substr(rowNames, 1,nchar(rowNames)-3) #Remove "-01" at end of patient IDs"
+rownames(pcReduction20.FilteredandRemoved)<-rowNames #Rename the rows
+ToRemovePatients<-setdiff(rowNames,colnames(RNAseqFil)) #Finding the patients that are not in the RNAseq data 
+
+```
+**Remove the 3 patients from the useMatrix and Re-run PCR**
+```{r}
+##Remove them 
+rownames(useMatrixFinal)<-patientsKept
+useMatrixFinalFil <- useMatrixFinal[!(row.names(useMatrixFinal) %in% ToRemovePatients),]
+useMatrixFinalFil <- t(useMatrixFinalFil)
+useMatrixFinalFil.pca20 <- prcomp(useMatrixFinalFil, center = TRUE, scale. = FALSE, rank. = 20)
+pcReduction20.FilteredandRemovedFil <- data.frame(useMatrixFinalFil.pca20$rotation)
+```
+
+
+**PCA plot of data**
+```{r}
+pca_res<-prcomp(t(RNAseqFil),scale.=TRUE)
+score<-pca_res$x
+
+score=as.data.frame(score)
+# score$color<-as.factor(colData$condition) colData is the patient groups data
+
+plt<-ggplot(score, aes(x=PC1, y=PC2))+geom_point(size=4)
+plt
+```
+**Differential Analysis**
+```{r}
+
+library(DESeq2)
+dds=DESeqDataSetFromMatrix(countData=RNAseqFil, colData=pcReduction20.FilteredandRemoved,design=~cont.var)
+
+dds=DESeq(dds)
+```
+

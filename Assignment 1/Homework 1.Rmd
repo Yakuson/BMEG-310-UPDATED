@@ -1,0 +1,69 @@
+---
+title: "Homework 1"
+author: "Charlene Harasym, Kira Li, Jackson Chen"
+date: "25/09/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Homework 1
+
+Contributions: All team members completed the assignment fully and we discussed to submit the final responses. 
+
+
+```{r}
+VCFdata<-read.csv(choose.files())
+```
+
+
+Question 1
+
+```{r}
+length(which(VCFdata$INDEL))
+```
+
+Question 2
+```{r}
+VCFdata$POS[which(VCFdata$INDEL & VCFdata$DP>15)]
+```
+Question 3
+```{r}
+ProbFunc<-function (Filename){
+  Probability<-1-10^(-Filename$QUAL/10)
+  
+  Filename$Probability<-Probability
+  head(Filename,5)
+}
+
+ProbFunc(VCFdata)
+
+```
+Question 4
+
+```{r}
+ALTFunc<-function(Filename){
+  A <-length(which(Filename$INDEL==FALSE & Filename$ALT=='A'))
+  C <-length(which(Filename$INDEL==FALSE & Filename$ALT=='C'))
+  t <-length(which(Filename$INDEL==FALSE & Filename$ALT=='T'))
+  G <-length(which(Filename$INDEL==FALSE & Filename$ALT=='G'))
+  print(paste("A:", A,"C:", C, "T:", t, "G:", G))
+}
+
+ALTFunc(VCFdata)
+```
+Question 5
+
+```{r}
+index<-which(VCFdata$INDEL)
+for(i in index){
+  if(nchar(VCFdata$ALT[i])>nchar(VCFdata$REF[i])+2){
+    print(VCFdata[i,])
+  }
+}
+```
+
+
